@@ -1,0 +1,54 @@
+name: Build & Deploy to AKS
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  AZURE_TENANT_ID:       ${{ vars.AZURE_TENANT_ID }}
+  AZURE_RG:              ${{ vars.AKS_RESOURCE_GROUP }}   # e.g. rg-aks-acr-demo
+  AKS_NAME:              ${{ vars.AKS_NAME }}             # e.g. aks-demo
+  ACR_NAME:              ${{ vars.ACR_NAME }}             # e.g. myacr123demo
+  ACR_LOGIN_SERVER:      ${{ vars.ACR_LOGIN_SERVER }}     # e.g. myacr123demo.azurecr.io
+  IMAGE_NAME:            demo-web
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:      ${{ vars.AZURE_CLIENT_ID }} # app reg with federated credential
+          tenant-id:      ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR Login
+        run: az acr login --name $ACR_NAME
+
+      - name: Build & Push Docker
+        working-directory: app
+        run: |
+          GIT_SHA=${{ github.sha }}
+          docker build -t $ACR_LOGIN_SERVER/$IMAGE_NAME:$GIT_SHA .
+          docker push $ACR_LOGIN_SERVER/$IMAGE_NAME:$GIT_SHA
+          echo "IMAGE_TAG=$GIT_SHA" >> $GITHUB_ENV
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.AZURE_RG }}
+          cluster-name:   ${{ env.AKS_NAME }}
+
+      - name: Deploy to AKS
+        run: |
+          sed -e "s#<ACR_LOGIN_SERVER>#$ACR_LOGIN_SERVER#g" \
+              -e "s#\$(IMAGE_TAG)#$IMAGE_TAG#g" k8s/deployment.yaml | kubectl apply -f -
+          kubectl rollout status deploy/demo-web
